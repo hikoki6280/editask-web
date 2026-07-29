@@ -1,0 +1,299 @@
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  border: 1px solid #d7dce3;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 28px;
+  text-align: left;
+}
+
+.login-panel h1 {
+  margin: 0 0 10px;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.login-panel p {
+  margin: 0 0 18px;
+  color: #5f6368;
+}
+
+.primary-button {
+  color: #ffffff;
+  border-color: #1a73e8;
+  background: #1a73e8;
+}
+
+.primary-button:hover {
+  background: #1765cc;
+}
+
+.danger-button {
+  color: #b3261e;
+  border-color: #f1b8b2;
+  background: #fff8f7;
+}
+
+.danger-button:hover {
+  background: #fce8e6;
+}
+
+.error-text {
+  margin-top: 12px;
+  color: #b3261e;
+}
+
+.app-shell {
+  height: 100vh;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  overflow: hidden;
+}
+
+.topbar,
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #d7dce3;
+  background: #ffffff;
+  padding: 8px 12px;
+}
+
+.topbar {
+  grid-row: 1;
+}
+
+.statusbar {
+  grid-row: 4;
+  min-height: 34px;
+  border-top: 1px solid #d7dce3;
+  border-bottom: none;
+  color: #5f6368;
+  font-size: 13px;
+}
+
+.file-controls,
+.session-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-icon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+
+.file-name-input {
+  width: 180px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.user-label {
+  max-width: 220px;
+  overflow: hidden;
+  color: #5f6368;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-state {
+  min-width: 72px;
+  border-radius: 999px;
+  padding: 3px 9px;
+  text-align: center;
+  font-size: 12px;
+  color: #3c4043;
+  background: #eef1f4;
+}
+
+.save-state-dirty {
+  color: #8a4b00;
+  background: #fff3d6;
+}
+
+.save-state-saving {
+  color: #174ea6;
+  background: #d9e7ff;
+}
+
+.save-state-saved {
+  color: #0b6b35;
+  background: #d8f3df;
+}
+
+.save-state-error {
+  color: #b3261e;
+  background: #fce8e6;
+}
+
+.workspace {
+  grid-row: 2;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.enhanced-filter-bar {
+  grid-row: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid #d7dce3;
+  background: #fafbfc;
+  padding: 7px 12px;
+}
+
+.enhanced-filter-bar label {
+  color: #3c4043;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.enhanced-filter-bar input {
+  width: min(360px, 45vw);
+}
+
+.enhanced-filter-bar span {
+  color: #5f6368;
+  font-size: 13px;
+}
+
+.editor-pane {
+  min-width: 0;
+  min-height: 0;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.cm-editor {
+  height: 100%;
+  min-height: 0;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.cm-scroller {
+  overflow: auto;
+}
+
+.cm-content {
+  padding: 14px 0;
+  width: max-content;
+  min-width: 100%;
+}
+
+.cm-line {
+  padding: 0 14px;
+  white-space: pre;
+}
+
+.cm-editask-attr,
+.cm-editask-ref,
+.cm-editask-ref-url {
+  color: #4d5bd1;
+}
+
+.cm-editask-ref-url {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cm-editask-invalid-attr {
+  color: #b3261e;
+}
+
+.cm-line.cm-editask-separator {
+  border-top: 1px solid #cfd6df;
+  background: transparent;
+  color: #4b5563;
+  font-weight: 600;
+}
+
+.cm-line.cm-editask-completed {
+  color: #8a8f98;
+}
+
+.cm-line.cm-editask-started {
+  color: #0f6b2f;
+}
+
+.cm-editask-memo {
+  color: #667085;
+  background: #fbfcff;
+}
+
+.cm-dow-月 {
+  color: #7b1fa2;
+}
+
+.cm-dow-火 {
+  color: #d84315;
+}
+
+.cm-dow-水 {
+  color: #00796b;
+}
+
+.cm-dow-木 {
+  color: #2e7d32;
+}
+
+.cm-dow-金 {
+  color: #996f00;
+}
+
+.cm-dow-土 {
+  color: #1565c0;
+}
+
+.cm-dow-日 {
+  color: #c62828;
+}
+
+@media (max-width: 780px) {
+  .topbar,
+  .statusbar,
+  .file-controls,
+  .session-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .topbar,
+  .statusbar {
+    align-items: normal;
+  }
+
+  .file-name-input,
+  .file-controls button,
+  .session-controls button {
+    width: 100%;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .enhanced-filter-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .enhanced-filter-bar input {
+    width: 100%;
+  }
+}
