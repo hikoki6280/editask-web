@@ -200,3 +200,5 @@ push 前に production build を確認できます。
 ```powershell
 npm run build
 ```
+
+操作を忘れないようにしてください。
