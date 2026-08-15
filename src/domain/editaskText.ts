@@ -1,4 +1,4 @@
-import { splitDocumentRegions } from './documentStructure'
+﻿import { splitDocumentRegions } from './documentStructure'
 import { isSeparatorLine } from './separatorLine'
 
 type Weekday = '月' | '火' | '水' | '木' | '金' | '土' | '日'
@@ -225,6 +225,8 @@ function normalizeToTasks(text: string): Task[] {
   let lastDate: DateOnly | undefined
 
   for (let line of lines) {
+    if (!line.trim()) continue
+
     line = line.replace(DATE_OFFSET_RE, (...args: unknown[]) => {
       const groups = args.at(-1) as { y: string; m: string; d: string; off: string }
       const base = parseDate(`${groups.y}/${groups.m}/${groups.d}`)
@@ -484,7 +486,8 @@ export function summarizeTodayTasks(text: string, today = todayJst()): TodayTask
 export function normalizeDocumentText(text: string): string {
   return splitDocumentRegions(text)
     .map((region) => {
-      if (region.kind === 'memo' || !region.text.trim()) return region.text
+      if (region.kind === 'memo') return region.text
+      if (!region.text.trim()) return ''
       const sortedText = renderTasks(sortTasks(normalizeToTasks(region.text)))
       return region.text.match(/[\r\n]$/) && sortedText ? `${sortedText}\n` : sortedText
     })

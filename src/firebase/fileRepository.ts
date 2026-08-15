@@ -1,12 +1,14 @@
 import {
-  deleteDoc,
   doc,
   getDoc,
   increment,
+  onSnapshot,
   serverTimestamp,
   setDoc,
   type Firestore,
+  type Unsubscribe,
 } from 'firebase/firestore'
+import { createDefaultTemplateContent } from '../domain/defaultTemplate'
 
 export type EditaskFile = {
   name: string
@@ -15,17 +17,42 @@ export type EditaskFile = {
   updatedAt?: unknown
 }
 
-export async function deleteFile(db: Firestore, uid: string, fileName: string): Promise<void> {
-  await deleteDoc(fileDoc(db, uid, fileName))
-}
-
 function fileDoc(db: Firestore, uid: string, fileName: string) {
   return doc(db, 'users', uid, 'files', encodeURIComponent(fileName))
 }
 
 export async function loadFile(db: Firestore, uid: string, fileName: string): Promise<EditaskFile> {
-  const snapshot = await getDoc(fileDoc(db, uid, fileName))
+  const targetRef = fileDoc(db, uid, fileName)
+  const snapshot = await getDoc(targetRef)
   if (!snapshot.exists()) {
+    if (fileName === 'main') {
+      const defaultRef = fileDoc(db, uid, 'default')
+      const defaultSnapshot = await getDoc(defaultRef)
+      if (defaultSnapshot.exists()) {
+        const defaultData = defaultSnapshot.data()
+        const defaultContent = String(defaultData.content ?? '')
+        if (defaultContent.trim()) {
+          await setDoc(targetRef, {
+            name: fileName,
+            content: defaultContent,
+            revision: 1,
+            updatedAt: serverTimestamp(),
+          })
+          return { name: fileName, content: defaultContent, revision: 1 }
+        }
+      }
+
+      const content = createDefaultTemplateContent()
+      const initialFile = {
+        name: fileName,
+        content,
+        revision: 1,
+        updatedAt: serverTimestamp(),
+      }
+      await setDoc(defaultRef, { ...initialFile, name: 'default' }, { merge: false })
+      await setDoc(targetRef, initialFile, { merge: false })
+      return { name: fileName, content, revision: 1 }
+    }
     return { name: fileName, content: '', revision: 0 }
   }
 
@@ -36,6 +63,33 @@ export async function loadFile(db: Firestore, uid: string, fileName: string): Pr
     revision: Number(data.revision ?? 0),
     updatedAt: data.updatedAt,
   }
+}
+
+export function subscribeFile(
+  db: Firestore,
+  uid: string,
+  fileName: string,
+  onChange: (file: EditaskFile) => void,
+  onError: () => void,
+): Unsubscribe {
+  return onSnapshot(
+    fileDoc(db, uid, fileName),
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        onChange({ name: fileName, content: '', revision: 0 })
+        return
+      }
+
+      const data = snapshot.data()
+      onChange({
+        name: String(data.name ?? fileName),
+        content: String(data.content ?? ''),
+        revision: Number(data.revision ?? 0),
+        updatedAt: data.updatedAt,
+      })
+    },
+    onError,
+  )
 }
 
 export async function saveFile(

@@ -1,4 +1,4 @@
-import { RangeSetBuilder, StateField, type Text } from '@codemirror/state'
+﻿import { RangeSetBuilder, StateField, type Text } from '@codemirror/state'
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import { isMemoDelimiter, type DocumentLineKind } from '../domain/documentStructure'
 import { isCompletedTaskLine, isStartedTaskLine, isUrlRef, parseEstimateMinutes } from '../domain/editaskText'
