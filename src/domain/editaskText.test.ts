@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatEstimateMinutes,
+  formatWorkForecast,
   isCompletedTaskLine,
   isStartedTaskLine,
   normalizeDocumentText,
@@ -137,6 +138,16 @@ describe('formatEstimateMinutes', () => {
     expect(formatEstimateMinutes(10)).toBe('\u0031\u0030\u5206')
     expect(formatEstimateMinutes(60)).toBe('\u0031\u6642\u9593\u0030\u5206')
     expect(formatEstimateMinutes(130)).toBe('\u0032\u6642\u9593\u0031\u0030\u5206')
+  })
+})
+
+describe('formatWorkForecast', () => {
+  it('shows the completion time and remaining estimate', () => {
+    expect(formatWorkForecast(70, new Date(2026, 5, 26, 20, 0))).toBe('21:10 (残り1時間10分)')
+  })
+
+  it('marks a completion time on the following day', () => {
+    expect(formatWorkForecast(50, new Date(2026, 5, 26, 23, 20))).toBe('翌日 00:10 (残り50分)')
   })
 })
 

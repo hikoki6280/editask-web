@@ -124,6 +124,26 @@ export function formatEstimateMinutes(minutes: number): string {
   return `${Math.floor(minutes / 60)}時間${minutes % 60}分`
 }
 
+export function formatWorkForecast(estimatedMinutes: number, now = new Date()): string {
+  const completion = new Date(now)
+  completion.setMinutes(completion.getMinutes() + estimatedMinutes)
+
+  const time = `${completion.getHours().toString().padStart(2, '0')}:${completion
+    .getMinutes()
+    .toString()
+    .padStart(2, '0')}`
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const completionStart = new Date(
+    completion.getFullYear(),
+    completion.getMonth(),
+    completion.getDate(),
+  ).getTime()
+  const daysLater = Math.round((completionStart - todayStart) / 86_400_000)
+  const dayLabel = daysLater === 0 ? '' : daysLater === 1 ? '翌日 ' : `${daysLater}日後 `
+
+  return `${dayLabel}${time} (残り${formatEstimateMinutes(estimatedMinutes)})`
+}
+
 function parseAttrs(text: string): TaskAttrs {
   const attrs: TaskAttrs = {}
   for (const match of text.matchAll(TOKEN_RE)) {

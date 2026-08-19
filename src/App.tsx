@@ -1,4 +1,4 @@
-import { Prec, type Extension } from '@codemirror/state'
+import { EditorSelection, Prec, type Extension } from '@codemirror/state'
 import { keymap } from '@codemirror/view'
 import { closeSearchPanel, openSearchPanel, searchPanelOpen, selectNextOccurrence } from '@codemirror/search'
 import { basicSetup, EditorView } from 'codemirror'
@@ -11,7 +11,7 @@ import {
 } from './domain/filter'
 import {
   getRefValueFromLine,
-  formatEstimateMinutes,
+  formatWorkForecast,
   isUrlRef,
   normalizeDocumentText,
   parseTaskLine,
@@ -21,7 +21,13 @@ import {
 } from './domain/editaskText'
 import { editaskHighlightExtensions } from './editor/editaskExtensions'
 import { db, firebaseEnabled } from './firebase/client'
-import { ensureFileFromDefault, loadFile, saveFile, subscribeFile } from './firebase/fileRepository'
+import {
+  ensureFileFromDefault,
+  loadFile,
+  saveFile,
+  subscribeFile,
+  type EditaskFile,
+} from './firebase/fileRepository'
 import { useAuthUser } from './hooks/useAuthUser'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error' | 'conflict'
@@ -45,6 +51,16 @@ type DiffPreview = {
   remoteOnly: string[]
   localOverflow: number
   remoteOverflow: number
+}
+
+function formatSavedAt(value: unknown): string {
+  if (!value || typeof value !== 'object' || !('toDate' in value)) return '不明'
+  const toDate = (value as { toDate?: unknown }).toDate
+  if (typeof toDate !== 'function') return '不明'
+
+  const date = toDate.call(value)
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '不明'
+  return new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
 // basicSetup starts with lineNumbers() and highlightActiveLineGutter().
@@ -210,7 +226,7 @@ function EditorApp() {
   const saveStateRef = useRef<SaveState>('idle')
   const skipNextFilterEffectRef = useRef(false)
   const parkedTextRef = useRef('')
-  const pendingRemoteContentRef = useRef<string | null>(null)
+  const pendingRemoteFileRef = useRef<EditaskFile | null>(null)
   const [fileName, setFileName] = useState(fileNameFromHash)
   const [filterQuery, setFilterQuery] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
@@ -220,6 +236,8 @@ function EditorApp() {
   const [conflictModalOpen, setConflictModalOpen] = useState(false)
   const [conflictVersion, setConflictVersion] = useState(0)
   const [todayTaskSummary, setTodayTaskSummary] = useState(() => summarizeTodayTasks(''))
+  const [lastSyncedUpdatedAt, setLastSyncedUpdatedAt] = useState<unknown>(undefined)
+  const [pendingRemoteUpdatedAt, setPendingRemoteUpdatedAt] = useState<unknown>(undefined)
 
   useEffect(() => {
     userRef.current = user
@@ -260,10 +278,10 @@ function EditorApp() {
   }, [])
 
   const conflictDiff = useMemo(() => {
-    if (!conflictModalOpen || pendingRemoteContentRef.current === null) {
+    if (!conflictModalOpen || pendingRemoteFileRef.current === null) {
       return buildLineDiffPreview('', '')
     }
-    return buildLineDiffPreview(currentEditorFullText(), pendingRemoteContentRef.current)
+    return buildLineDiffPreview(currentEditorFullText(), pendingRemoteFileRef.current.content)
   }, [conflictModalOpen, conflictVersion, currentEditorFullText])
 
   const captureCursorRestoreTarget = useCallback((view: EditorView): CursorRestoreTarget => {
@@ -289,7 +307,9 @@ function EditorApp() {
     try {
       const loaded = await loadFile(db, currentUser.uid, currentFileName)
       parkedTextRef.current = ''
-      pendingRemoteContentRef.current = null
+      pendingRemoteFileRef.current = null
+      setLastSyncedUpdatedAt(loaded.updatedAt)
+      setPendingRemoteUpdatedAt(undefined)
       setConflictModalOpen(false)
       filterActiveRef.current = false
       filterOpenRef.current = false
@@ -345,7 +365,8 @@ function EditorApp() {
         restoreCursorOffsetInScroller(view, nextSelection, restoreOffset)
       }
       setTodayTaskSummary(summarizeTodayTasks(normalized))
-      pendingRemoteContentRef.current = null
+      pendingRemoteFileRef.current = null
+      setPendingRemoteUpdatedAt(undefined)
       setConflictModalOpen(false)
       setSaveState('saved')
     } catch {
@@ -493,6 +514,62 @@ function EditorApp() {
   }, [])
 
   const toggleCurrentLineStartEnd = useCallback((view: EditorView) => {
+    if (view.state.selection.ranges.some((range) => !range.empty)) {
+      const selectionSnapshot = view.state.selection.ranges.map((range) => {
+        const positionToLineColumn = (position: number) => {
+          const line = view.state.doc.lineAt(position)
+          return { lineNumber: line.number, column: position - line.from }
+        }
+        return {
+          anchor: positionToLineColumn(range.anchor),
+          head: positionToLineColumn(range.head),
+        }
+      })
+      const lineNumbers = new Set<number>()
+      for (const range of view.state.selection.ranges) {
+        const from = Math.min(range.from, range.to)
+        const to = Math.max(range.from, range.to)
+        const firstLine = view.state.doc.lineAt(from).number
+        const lastLine = view.state.doc.lineAt(Math.max(from, to - 1)).number
+        for (let lineNumber = firstLine; lineNumber <= lastLine; lineNumber += 1) {
+          lineNumbers.add(lineNumber)
+        }
+      }
+
+      const nextLines: string[] = []
+      const changes = [...lineNumbers]
+        .sort((a, b) => a - b)
+        .flatMap((lineNumber) => {
+          const line = view.state.doc.line(lineNumber)
+          const result = toggleTaskStartEndLineWithNext(line.text)
+          if (result.nextLine) nextLines.push(result.nextLine)
+          return result.line !== line.text ? [{ from: line.from, to: line.to, insert: result.line }] : []
+        })
+      if (nextLines.length > 0) {
+        const docText = view.state.doc.toString()
+        changes.push({
+          from: view.state.doc.length,
+          to: view.state.doc.length,
+          insert: `${docText.endsWith('\n') || docText.length === 0 ? '' : '\n'}${nextLines.join('\n')}`,
+        })
+      }
+      if (changes.length === 0) return true
+
+      const nextDoc = view.state.update({ changes }).state.doc
+      const selection = EditorSelection.create(
+        selectionSnapshot.map((range) => {
+          const lineColumnToPosition = ({ lineNumber, column }: { lineNumber: number; column: number }) => {
+            const line = nextDoc.line(lineNumber)
+            return line.from + Math.min(column, line.length)
+          }
+          return EditorSelection.range(lineColumnToPosition(range.anchor), lineColumnToPosition(range.head))
+        }),
+        view.state.selection.mainIndex,
+      )
+      view.dispatch({ changes, selection })
+      return true
+    }
+
     const line = view.state.doc.lineAt(view.state.selection.main.head)
     const result = toggleTaskStartEndLineWithNext(line.text)
     if (result.line === line.text && !result.nextLine) return true
@@ -515,6 +592,16 @@ function EditorApp() {
   }, [])
 
   const shiftSelectedTaskDates = useCallback((view: EditorView, deltaDays: number) => {
+    const selectionSnapshot = view.state.selection.ranges.map((range) => {
+      const positionToLineColumn = (position: number) => {
+        const line = view.state.doc.lineAt(position)
+        return { lineNumber: line.number, column: position - line.from }
+      }
+      return {
+        anchor: positionToLineColumn(range.anchor),
+        head: positionToLineColumn(range.head),
+      }
+    })
     const lineNumbers = new Set<number>()
     for (const range of view.state.selection.ranges) {
       if (range.empty) {
@@ -540,7 +627,20 @@ function EditorApp() {
       })
 
     if (changes.length === 0) return true
-    view.dispatch({ changes })
+
+    const nextDoc = view.state.update({ changes }).state.doc
+    const selection = EditorSelection.create(
+      selectionSnapshot.map((range) => {
+        const lineColumnToPosition = ({ lineNumber, column }: { lineNumber: number; column: number }) => {
+          const line = nextDoc.line(lineNumber)
+          return line.from + Math.min(column, line.length)
+        }
+        return EditorSelection.range(lineColumnToPosition(range.anchor), lineColumnToPosition(range.head))
+      }),
+      view.state.selection.mainIndex,
+    )
+
+    view.dispatch({ changes, selection })
     return true
   }, [])
 
@@ -585,7 +685,7 @@ function EditorApp() {
   }, [toggleCurrentLineStartEnd])
 
   const openConflictResolver = useCallback(() => {
-    if (pendingRemoteContentRef.current !== null) {
+    if (pendingRemoteFileRef.current !== null) {
       setConflictModalOpen(true)
     }
   }, [])
@@ -597,11 +697,13 @@ function EditorApp() {
 
   const resolveConflictWithRemote = useCallback(() => {
     const view = editorView.current
-    const remoteContent = pendingRemoteContentRef.current
-    if (!view || remoteContent === null) return
+    const remoteFile = pendingRemoteFileRef.current
+    if (!view || remoteFile === null) return
+    const remoteContent = remoteFile.content
 
     parkedTextRef.current = ''
-    pendingRemoteContentRef.current = null
+    pendingRemoteFileRef.current = null
+    setPendingRemoteUpdatedAt(undefined)
     filterActiveRef.current = false
     filterOpenRef.current = false
     setFilterActive(false)
@@ -615,6 +717,7 @@ function EditorApp() {
       scrollIntoView: true,
     })
     setTodayTaskSummary(summarizeTodayTasks(remoteContent))
+    setLastSyncedUpdatedAt(remoteFile.updatedAt)
     setSaveState('saved')
     view.focus()
   }, [])
@@ -637,13 +740,20 @@ function EditorApp() {
       (remoteFile) => {
         const view = editorView.current
         if (!view) return
-        if (saveStateRef.current === 'saving') return
+        if (saveStateRef.current === 'saving') {
+          setLastSyncedUpdatedAt(remoteFile.updatedAt)
+          return
+        }
 
         const currentContent = currentEditorFullText()
-        if (currentContent === remoteFile.content) return
+        if (currentContent === remoteFile.content) {
+          setLastSyncedUpdatedAt(remoteFile.updatedAt)
+          return
+        }
 
         if (saveStateRef.current !== 'saved' || filterActiveRef.current) {
-          pendingRemoteContentRef.current = remoteFile.content
+          pendingRemoteFileRef.current = remoteFile
+          setPendingRemoteUpdatedAt(remoteFile.updatedAt)
           setConflictVersion((version) => version + 1)
           saveStateRef.current = 'conflict'
           setSaveState('conflict')
@@ -657,6 +767,7 @@ function EditorApp() {
           scrollIntoView: true,
         })
         setTodayTaskSummary(summarizeTodayTasks(remoteFile.content))
+        setLastSyncedUpdatedAt(remoteFile.updatedAt)
         setSaveState('saved')
       },
       () => {
@@ -831,32 +942,34 @@ function EditorApp() {
             <h2 id="conflict-title">Conflict</h2>
             <p>他のタブでこのファイルが更新されています。どちらを正として残すか選んでください。</p>
             <div className="conflict-diff">
-              <section>
-                <h3>ローカルのみ</h3>
+              <section className="conflict-file-option">
+                <h3>現在のファイル</h3>
+                <p className="conflict-file-meta">未保存の編集あり（最後の同期: {formatSavedAt(lastSyncedUpdatedAt)}）</p>
                 <pre>
                   {conflictDiff.localOnly.length > 0
                     ? conflictDiff.localOnly.map((line) => `- ${line}`).join('\n')
                     : '差分なし'}
                   {conflictDiff.localOverflow > 0 ? `\n...他 ${conflictDiff.localOverflow} 行` : ''}
                 </pre>
+                <button type="button" onClick={resolveConflictWithLocal}>
+                  この内容で保存
+                </button>
               </section>
-              <section>
-                <h3>リモートのみ</h3>
+              <section className="conflict-file-option">
+                <h3>リモートのファイル</h3>
+                <p className="conflict-file-meta">
+                  保存: {formatSavedAt(pendingRemoteUpdatedAt)}
+                </p>
                 <pre>
                   {conflictDiff.remoteOnly.length > 0
                     ? conflictDiff.remoteOnly.map((line) => `+ ${line}`).join('\n')
                     : '差分なし'}
                   {conflictDiff.remoteOverflow > 0 ? `\n...他 ${conflictDiff.remoteOverflow} 行` : ''}
                 </pre>
+                <button type="button" className="primary-button" onClick={resolveConflictWithRemote}>
+                  リモートを読み込む
+                </button>
               </section>
-            </div>
-            <div className="conflict-actions">
-              <button type="button" onClick={resolveConflictWithLocal}>
-                この内容で保存
-              </button>
-              <button type="button" className="primary-button" onClick={resolveConflictWithRemote}>
-                リモートを読み込む
-              </button>
             </div>
           </section>
         </div>
@@ -905,7 +1018,7 @@ function EditorApp() {
       <footer className="statusbar">
         <span>
           {'\u4eca\u65e5: '}{todayTaskSummary.remaining}{' \u5b8c\u4e86: '}{todayTaskSummary.completed}{' \u4f5c\u696d\u4e88\u6e2c: '}
-          {formatEstimateMinutes(todayTaskSummary.estimatedMinutes)}
+          {formatWorkForecast(todayTaskSummary.estimatedMinutes)}
         </span>
         <span>Ctrl+S Save / Ctrl+F Find / Ctrl+Shift+F Filter / Ctrl+Shift+Up/Down Date / Ctrl+R ref</span>
       </footer>

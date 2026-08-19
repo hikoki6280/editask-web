@@ -193,6 +193,18 @@
   font-size: 13px;
 }
 
+.conflict-file-option {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.conflict-file-meta {
+  margin: 0 0 8px !important;
+  color: #5f6368;
+  font-size: 12px;
+}
+
 .conflict-diff pre {
   min-height: 140px;
   max-height: 260px;
@@ -209,11 +221,9 @@
   line-height: 1.45;
 }
 
-.conflict-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 14px;
+.conflict-file-option button {
+  width: 100%;
+  margin-top: 10px;
 }
 
 .workspace {
@@ -361,6 +371,10 @@
   }
 
   .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .conflict-diff {
     grid-template-columns: 1fr;
   }
 
