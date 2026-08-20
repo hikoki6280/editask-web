@@ -97,6 +97,79 @@
   border-bottom: 1px solid #e2e7ef;
 }
 
+.file-quick-search {
+  position: relative;
+  display: flex;
+  min-height: 40px;
+  gap: 6px;
+  border-bottom: 1px solid #e2e7ef;
+  padding: 5px 8px;
+}
+
+.file-quick-search input {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+}
+
+.file-quick-search button[type='submit'] {
+  min-height: 28px;
+  padding: 3px 9px;
+  font-size: 13px;
+}
+
+.file-quick-search-results {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% - 1px);
+  right: 8px;
+  left: 8px;
+  overflow: hidden;
+  border: 1px solid #cfd6df;
+  border-radius: 4px;
+  background: #ffffff;
+  box-shadow: 0 5px 12px rgba(32, 33, 36, 0.18);
+}
+
+.file-quick-search-results button {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+  color: #202124;
+  font-size: 13px;
+  text-align: left;
+}
+
+.file-quick-search-results button:hover,
+.file-quick-search-results button.active {
+  background: #e8f0fe;
+}
+
+.file-quick-search-results button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-quick-search-results button small {
+  flex: 0 0 auto;
+  color: #5f6368;
+  font-size: 10px;
+}
+
+.file-quick-search-results p {
+  margin: 0;
+  padding: 8px;
+  color: #5f6368;
+  font-size: 12px;
+}
+
 .file-drawer-filter {
   display: flex;
   min-height: 34px;
@@ -335,6 +408,32 @@
 .file-name-input {
   width: 180px;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.view-name-label {
+  max-width: 320px;
+  overflow: hidden;
+  color: #5f6368;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cm-source-gutter {
+  width: 112px;
+  border-right: 1px solid #edf0f4;
+  color: #6b7280;
+}
+
+.cm-source-marker {
+  display: block;
+  overflow: hidden;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .user-label {
@@ -587,6 +686,10 @@
   color: #c62828;
 }
 @media (max-width: 780px) {
+  .cm-source-gutter {
+    width: 76px;
+  }
+
   .topbar,
   .statusbar,
   .file-controls,

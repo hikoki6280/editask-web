@@ -1,5 +1,6 @@
 ﻿import { splitDocumentRegions } from './documentStructure'
 import { isSeparatorLine } from './separatorLine'
+import { parseViewRef } from './viewRef'
 
 type Weekday = '月' | '火' | '水' | '木' | '金' | '土' | '日'
 
@@ -33,6 +34,11 @@ export type TodayTaskSummary = {
   remaining: number
   completed: number
   estimatedMinutes: number
+}
+
+export type SourcedTaskLine = {
+  line: string
+  source: string
 }
 
 const LINE_RE =
@@ -238,8 +244,7 @@ function nearestWeekdayDate(today: DateOnly, targetDow: Weekday): DateOnly {
   return today
 }
 
-function normalizeToTasks(text: string): Task[] {
-  const today = todayJst()
+function normalizeToTasks(text: string, today = todayJst()): Task[] {
   const lines = text.split(/\r?\n/)
   const out: string[] = []
   let lastDate: DateOnly | undefined
@@ -303,8 +308,7 @@ function classifySection(date: DateOnly | undefined, today: DateOnly): number {
   return compared > 0 ? 1 : 2
 }
 
-function sortTasks(tasks: Task[]): Task[] {
-  const today = todayJst()
+function sortTasks(tasks: Task[], today = todayJst()): Task[] {
 
   const adjusted = tasks.map((task) => {
     if (task.raw !== undefined) return task
@@ -503,12 +507,12 @@ export function summarizeTodayTasks(text: string, today = todayJst()): TodayTask
   return { remaining, completed, estimatedMinutes }
 }
 
-export function normalizeDocumentText(text: string): string {
+export function normalizeDocumentText(text: string, today = todayJst()): string {
   return splitDocumentRegions(text)
     .map((region) => {
       if (region.kind === 'memo') return region.text
       if (!region.text.trim()) return ''
-      const sortedText = renderTasks(sortTasks(normalizeToTasks(region.text)))
+      const sortedText = renderTasks(sortTasks(normalizeToTasks(region.text, today), today))
       return region.text.match(/[\r\n]$/) && sortedText ? `${sortedText}\n` : sortedText
     })
     .join('')
@@ -523,6 +527,41 @@ export function isUrlRef(value: string): boolean {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value.trim())
 }
 
+export function aggregateTaskLines(
+  files: Array<{ name: string; content: string }>,
+  today = todayJst(),
+): SourcedTaskLine[] {
+  const tasks: Array<SourcedTaskLine & { task: Task }> = []
+  for (const file of files) {
+    for (const region of splitDocumentRegions(file.content)) {
+      if (region.kind === 'memo') continue
+      for (const line of region.text.split(/\r?\n/)) {
+        const task = parseTaskLine(line)
+        if (
+          task.raw !== undefined ||
+          !task.date ||
+          task.end ||
+          compareDate(task.date, today) < 0 ||
+          isSeparatorLine(line)
+        ) {
+          continue
+        }
+        tasks.push({ line: formatTaskLine(task), source: file.name, task })
+      }
+    }
+  }
+
+  return tasks
+    .sort((a, b) => {
+      const dateCompare = compareDate(a.task.date!, b.task.date!)
+      if (dateCompare !== 0) return dateCompare
+      const descCompare = a.task.desc.trim().localeCompare(b.task.desc.trim(), 'ja')
+      if (descCompare !== 0) return descCompare
+      return a.source.localeCompare(b.source, 'ja')
+    })
+    .map(({ line, source }) => ({ line, source }))
+}
+
 export function collectFileRefs(text: string): Set<string> {
   const refs = new Set<string>()
   for (const region of splitDocumentRegions(text)) {
@@ -530,7 +569,9 @@ export function collectFileRefs(text: string): Set<string> {
     for (const line of region.text.split(/\r?\n/)) {
       const ref = parseTaskLine(line).attrs.ref
       if (!ref || isUrlRef(ref)) continue
-      refs.add(ref.replace(/\.txt$/i, '') || 'main')
+      const selectors = parseViewRef(ref)
+      if (selectors) selectors.forEach((selector) => refs.add(selector))
+      else refs.add(ref.replace(/\.txt$/i, '') || 'main')
     }
   }
   return refs

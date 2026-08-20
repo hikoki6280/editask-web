@@ -1,4 +1,4 @@
-import { EditorSelection, Prec, type Extension } from '@codemirror/state'
+import { Compartment, EditorSelection, EditorState, Prec, type Extension } from '@codemirror/state'
 import { keymap } from '@codemirror/view'
 import { closeSearchPanel, openSearchPanel, searchPanelOpen, selectNextOccurrence } from '@codemirror/search'
 import { basicSetup, EditorView } from 'codemirror'
@@ -10,6 +10,7 @@ import {
   type FilterParts,
 } from './domain/filter'
 import {
+  aggregateTaskLines,
   collectFileRefs,
   getRefValueFromLine,
   formatWorkForecast,
@@ -19,19 +20,24 @@ import {
   shiftTaskDateLine,
   summarizeTodayTasks,
   toggleTaskStartEndLineWithNext,
+  type SourcedTaskLine,
 } from './domain/editaskText'
 import { editaskHighlightExtensions } from './editor/editaskExtensions'
+import { sourceGutter } from './editor/sourceGutter'
+import { buildFileQuickSearchCandidates, quickSearchFiles } from './domain/fileQuickSearch'
 import { db, firebaseEnabled } from './firebase/client'
 import {
   ensureFileFromDefault,
   listFileIndex,
   loadFile,
+  loadViewFiles,
   saveFile,
   subscribeFile,
   type EditaskFile,
   type EditaskFileIndex,
 } from './firebase/fileRepository'
 import { useAuthUser } from './hooks/useAuthUser'
+import { matchesViewSelector, parseViewRef } from './domain/viewRef'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error' | 'conflict'
 
@@ -133,6 +139,11 @@ function fileNameFromHash(): string {
   return match ? decodeURIComponent(match[1]) : 'main'
 }
 
+function viewSpecFromHash(): string | undefined {
+  const match = /^#\/views\/(.+)$/.exec(window.location.hash)
+  return match ? decodeURIComponent(match[1]) : undefined
+}
+
 function updateHashFileName(fileName: string) {
   window.history.replaceState(null, '', `#/files/${encodeURIComponent(fileName)}`)
 }
@@ -157,6 +168,14 @@ function findLinePosition(text: string, lineText: string, column: number): numbe
     offset += line.length + 1
   }
   return undefined
+}
+
+function viewUrl(spec: string): string {
+  return `${window.location.origin}${window.location.pathname}#/views/${encodeURIComponent(spec)}`
+}
+
+function sourceMapForTasks(tasks: SourcedTaskLine[]): Map<number, string> {
+  return new Map(tasks.map((task, index) => [index + 1, task.source]))
 }
 
 function buildLineDiffPreview(localText: string, remoteText: string, maxLines = 8): DiffPreview {
@@ -289,6 +308,11 @@ function EditorApp() {
   const skipNextFilterEffectRef = useRef(false)
   const parkedTextRef = useRef('')
   const pendingRemoteFileRef = useRef<EditaskFile | null>(null)
+  const sourceGutterCompartment = useRef(new Compartment())
+  const readOnlyCompartment = useRef(new Compartment())
+  const viewTasksRef = useRef<SourcedTaskLine[]>([])
+  const [viewSpec] = useState(viewSpecFromHash)
+  const viewOnly = viewSpec !== undefined
   const [fileName, setFileName] = useState(fileNameFromHash)
   const [filterQuery, setFilterQuery] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
@@ -307,6 +331,10 @@ function EditorApp() {
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set())
   const [fileDisplay, setFileDisplay] = useState<FileDisplay>('all')
   const [currentFileRefs, setCurrentFileRefs] = useState<Set<string>>(() => new Set())
+  const [viewSources, setViewSources] = useState<Map<number, string>>(() => new Map())
+  const [quickSearchQuery, setQuickSearchQuery] = useState('')
+  const [quickSearchFocused, setQuickSearchFocused] = useState(false)
+  const [quickSearchIndex, setQuickSearchIndex] = useState(0)
   const [fileSort, setFileSort] = useState<FileSort>(() =>
     window.localStorage.getItem('editask-file-sort') === 'name' ? 'name' : 'updated',
   )
@@ -316,9 +344,9 @@ function EditorApp() {
   }, [user])
 
   useEffect(() => {
-    fileNameRef.current = fileName
-    document.title = fileName || 'EdiTask'
-  }, [fileName])
+    if (!viewOnly) fileNameRef.current = fileName
+    document.title = viewOnly ? `View: ${viewSpec}` : fileName || 'EdiTask'
+  }, [fileName, viewOnly, viewSpec])
 
   useEffect(() => {
     window.localStorage.setItem('editask-file-sort', fileSort)
@@ -337,13 +365,14 @@ function EditorApp() {
   }, [saveState])
 
   const statusLabel = useMemo(() => {
+    if (viewOnly) return 'View only'
     if (saveState === 'dirty') return 'Unsaved'
     if (saveState === 'saving') return 'Saving'
     if (saveState === 'saved') return 'Saved'
     if (saveState === 'error') return 'Error'
     if (saveState === 'conflict') return 'Conflict'
     return 'Idle'
-  }, [saveState])
+  }, [saveState, viewOnly])
 
   const currentEditorFullText = useCallback((): string => {
     const view = editorView.current
@@ -354,10 +383,24 @@ function EditorApp() {
   }, [])
 
   const displayedFiles = useMemo(
-    () => (fileDisplay === 'refs' ? (fileList ?? []).filter((file) => currentFileRefs.has(file.name)) : fileList ?? []),
+    () =>
+      fileDisplay === 'refs'
+        ? (fileList ?? []).filter((file) =>
+            [...currentFileRefs].some((selector) => matchesViewSelector(file.name, selector)),
+          )
+        : fileList ?? [],
     [currentFileRefs, fileDisplay, fileList],
   )
   const fileTree = useMemo(() => buildFileTree(displayedFiles, fileSort), [displayedFiles, fileSort])
+  const quickSearchCandidates = useMemo(
+    () => buildFileQuickSearchCandidates((fileList ?? []).map((file) => file.name)),
+    [fileList],
+  )
+  const quickSearchResults = useMemo(
+    () => quickSearchFiles(quickSearchCandidates, quickSearchQuery),
+    [quickSearchCandidates, quickSearchQuery],
+  )
+  const quickSearchVisible = quickSearchFocused && quickSearchQuery.trim().length > 0
   const visibleFileTree = useMemo(
     () =>
       fileTree.filter((entry) => {
@@ -386,6 +429,23 @@ function EditorApp() {
     const url = `${window.location.origin}${window.location.pathname}#/files/${encodeURIComponent(nextName)}`
     window.open(url, '_blank', 'noopener,noreferrer')
   }, [])
+
+  const openFolderViewInNewTab = useCallback((path: string) => {
+    window.open(viewUrl(`${path}/*`), '_blank', 'noopener,noreferrer')
+  }, [])
+
+  const openQuickSearchTarget = useCallback(
+    (value: string) => {
+      const target = value.trim().replace(/^(?:ref|r):/i, '')
+      if (!target) return
+      if (parseViewRef(target)) window.open(viewUrl(target), '_blank', 'noopener,noreferrer')
+      else openFileInNewTab(target.replace(/\.txt$/i, '') || 'main')
+      setQuickSearchQuery('')
+      setQuickSearchIndex(0)
+      setFileDrawerOpen(false)
+    },
+    [openFileInNewTab],
+  )
 
   const conflictDiff = useMemo(() => {
     if (!conflictModalOpen || pendingRemoteFile === null) {
@@ -439,11 +499,43 @@ function EditorApp() {
     }
   }, [])
 
+  const loadVirtualView = useCallback(async () => {
+    const currentUser = userRef.current
+    const selectors = viewSpec ? parseViewRef(viewSpec) : undefined
+    if (!db || !currentUser || !selectors) {
+      setSaveState('error')
+      return
+    }
+
+    try {
+      const files = await loadViewFiles(db, currentUser.uid, selectors)
+      const tasks = aggregateTaskLines(files)
+      const content = tasks.map((task) => task.line).join('\n')
+      parkedTextRef.current = ''
+      filterActiveRef.current = false
+      filterOpenRef.current = false
+      setFilterActive(false)
+      setFilterOpen(false)
+      setFilterQuery('')
+      setFilterVisibleCount(null)
+      editorView.current?.dispatch({
+        changes: { from: 0, to: editorView.current.state.doc.length, insert: content },
+      })
+      viewTasksRef.current = tasks
+      setViewSources(sourceMapForTasks(tasks))
+      setTodayTaskSummary(summarizeTodayTasks(content))
+      setCurrentFileRefs(collectFileRefs(content))
+      setSaveState('idle')
+    } catch {
+      setSaveState('error')
+    }
+  }, [viewSpec])
+
   const saveCurrentFile = useCallback(async () => {
     const currentUser = userRef.current
     const currentFileName = fileNameRef.current
     const view = editorView.current
-    if (!db || !currentUser || !view) return
+    if (viewOnly || !db || !currentUser || !view) return
 
     setSaveState('saving')
     const editorText = view.state.doc.toString()
@@ -485,7 +577,7 @@ function EditorApp() {
     } catch {
       setSaveState('error')
     }
-  }, [captureCursorRestoreTarget])
+  }, [captureCursorRestoreTarget, viewOnly])
 
   const applyFilterParts = useCallback((parts: FilterParts, restore?: CursorRestoreTarget) => {
     parkedTextRef.current = parts.parkedText
@@ -508,16 +600,35 @@ function EditorApp() {
     setSaveState((state) => (state === 'saving' || state === 'conflict' ? state : 'dirty'))
   }, [])
 
+  const applyViewFilter = useCallback((query: string) => {
+    const needle = query.trim()
+    const tasks = needle
+      ? viewTasksRef.current.filter((task) => task.line.includes(needle))
+      : viewTasksRef.current
+    const content = tasks.map((task) => task.line).join('\n')
+    filterActiveRef.current = Boolean(needle)
+    setFilterActive(Boolean(needle))
+    setFilterVisibleCount(needle ? tasks.length : null)
+    editorView.current?.dispatch({
+      changes: { from: 0, to: editorView.current.state.doc.length, insert: content },
+    })
+    setViewSources(sourceMapForTasks(tasks))
+  }, [])
+
   const applyFilter = useCallback(
     (query: string) => {
       const view = editorView.current
       if (!view) return
+      if (viewOnly) {
+        applyViewFilter(query)
+        return
+      }
       const baseText = filterActiveRef.current
         ? normalizeDocumentText(joinFilterParts(parkedTextRef.current, view.state.doc.toString()))
         : view.state.doc.toString()
       applyFilterParts(splitForFilter(baseText, query))
     },
-    [applyFilterParts],
+    [applyFilterParts, applyViewFilter, viewOnly],
   )
 
   const getFilterInitialQuery = useCallback((view: EditorView): FilterInitialQuery => {
@@ -547,6 +658,21 @@ function EditorApp() {
       setFilterActive(false)
       setFilterVisibleCount(null)
       parkedTextRef.current = ''
+      return
+    }
+
+    if (viewOnly) {
+      const tasks = viewTasksRef.current
+      const content = tasks.map((task) => task.line).join('\n')
+      filterActiveRef.current = false
+      filterOpenRef.current = false
+      setFilterOpen(false)
+      setFilterQuery('')
+      setFilterActive(false)
+      setFilterVisibleCount(null)
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: content } })
+      setViewSources(sourceMapForTasks(tasks))
+      view.focus()
       return
     }
 
@@ -582,7 +708,7 @@ function EditorApp() {
     restoreCursorOffsetInScroller(view, restorePosition, restoreOffset)
     setSaveState((state) => (state === 'saving' || state === 'conflict' ? state : 'dirty'))
     view.focus()
-  }, [captureCursorRestoreTarget])
+  }, [captureCursorRestoreTarget, viewOnly])
 
   const openFilter = useCallback(() => {
     const view = editorView.current
@@ -596,7 +722,8 @@ function EditorApp() {
         ? normalizeDocumentText(joinFilterParts(parkedTextRef.current, view.state.doc.toString()))
         : view.state.doc.toString()
       skipNextFilterEffectRef.current = true
-      applyFilterParts(splitForFilter(baseText, initialQuery.query), restore)
+      if (viewOnly) applyViewFilter(initialQuery.query)
+      else applyFilterParts(splitForFilter(baseText, initialQuery.query), restore)
     } else {
       setFilterQuery('')
     }
@@ -608,7 +735,7 @@ function EditorApp() {
       filterInputRef.current?.focus()
       filterInputRef.current?.select()
     }, 0)
-  }, [applyFilterParts, captureCursorRestoreTarget, getFilterInitialQuery])
+  }, [applyFilterParts, applyViewFilter, captureCursorRestoreTarget, getFilterInitialQuery, viewOnly])
 
   const toggleFilter = useCallback(() => {
     if (filterOpenRef.current) {
@@ -619,6 +746,22 @@ function EditorApp() {
     return true
   }, [closeFilter, openFilter])
 
+  useEffect(() => {
+    const handleGlobalFilterShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.key.toLowerCase() !== 'f') return
+      if (event.defaultPrevented) return
+
+      const target = event.target instanceof Element ? event.target : undefined
+      if (target?.closest('input, textarea, select')) return
+
+      event.preventDefault()
+      toggleFilter()
+    }
+
+    window.addEventListener('keydown', handleGlobalFilterShortcut)
+    return () => window.removeEventListener('keydown', handleGlobalFilterShortcut)
+  }, [toggleFilter])
+
   const toggleSearchPanel = useCallback((view: EditorView) => {
     if (searchPanelOpen(view.state)) {
       return closeSearchPanel(view)
@@ -627,6 +770,7 @@ function EditorApp() {
   }, [])
 
   const toggleCurrentLineStartEnd = useCallback((view: EditorView) => {
+    if (viewOnly) return true
     if (view.state.selection.ranges.some((range) => !range.empty)) {
       const selectionSnapshot = view.state.selection.ranges.map((range) => {
         const positionToLineColumn = (position: number) => {
@@ -702,9 +846,10 @@ function EditorApp() {
       selection: { anchor: line.from + Math.min(result.line.length, view.state.selection.main.head - line.from) },
     })
     return true
-  }, [])
+  }, [viewOnly])
 
   const shiftSelectedTaskDates = useCallback((view: EditorView, deltaDays: number) => {
+    if (viewOnly) return true
     const selectionSnapshot = view.state.selection.ranges.map((range) => {
       const positionToLineColumn = (position: number) => {
         const line = view.state.doc.lineAt(position)
@@ -755,7 +900,7 @@ function EditorApp() {
 
     view.dispatch({ changes, selection })
     return true
-  }, [])
+  }, [viewOnly])
 
   const openRef = useCallback(async () => {
     const view = editorView.current
@@ -769,6 +914,11 @@ function EditorApp() {
 
     if (isUrlRef(ref)) {
       window.open(ref, '_blank', 'noopener,noreferrer')
+      return
+    }
+
+    if (parseViewRef(ref)) {
+      window.open(viewUrl(ref), '_blank', 'noopener,noreferrer')
       return
     }
 
@@ -838,18 +988,19 @@ function EditorApp() {
   }, [])
 
   useEffect(() => {
-    updateHashFileName(fileName)
-  }, [fileName])
+    if (!viewOnly) updateHashFileName(fileName)
+  }, [fileName, viewOnly])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadCurrentFile()
+      if (viewOnly) void loadVirtualView()
+      else void loadCurrentFile()
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [fileName, loadCurrentFile, user])
+  }, [fileName, loadCurrentFile, loadVirtualView, user, viewOnly])
 
   useEffect(() => {
-    if (!db || !user) return undefined
+    if (viewOnly || !db || !user) return undefined
 
     return subscribeFile(
       db,
@@ -893,7 +1044,7 @@ function EditorApp() {
         if (saveStateRef.current === 'saved') setSaveState('error')
       },
     )
-  }, [currentEditorFullText, fileName, user])
+  }, [currentEditorFullText, fileName, user, viewOnly])
 
   useEffect(() => {
     if (!filterOpen) return undefined
@@ -919,6 +1070,11 @@ function EditorApp() {
       doc: '',
       extensions: [
         editaskSetup,
+        sourceGutterCompartment.current.of([]),
+        readOnlyCompartment.current.of([
+          EditorState.readOnly.of(viewOnly),
+          EditorView.editable.of(!viewOnly),
+        ]),
         Prec.highest(
           keymap.of([
             {
@@ -932,11 +1088,6 @@ function EditorApp() {
               run: toggleSearchPanel,
               preventDefault: true,
               scope: 'editor search-panel',
-            },
-            {
-              key: 'Mod-Shift-f',
-              run: toggleFilter,
-              preventDefault: true,
             },
             {
               key: 'Mod-Shift-d',
@@ -970,13 +1121,16 @@ function EditorApp() {
             if (filterActiveRef.current) {
               setFilterVisibleCount(update.state.doc.length > 0 ? update.state.doc.lines : 0)
             }
-            setSaveState((state) => (state === 'saving' || state === 'conflict' ? state : 'dirty'))
+            if (!viewOnly) {
+              setSaveState((state) => (state === 'saving' || state === 'conflict' ? state : 'dirty'))
+            }
           }
         }),
         EditorView.domEventHandlers({
           keydown(event) {
             if (event.ctrlKey && event.key.toLowerCase() === 's') {
               event.preventDefault()
+              if (viewOnly) return true
               if (saveStateRef.current === 'conflict') openConflictResolver()
               else void saveCurrentFile()
               return true
@@ -1008,14 +1162,100 @@ function EditorApp() {
     saveCurrentFile,
     shiftSelectedTaskDates,
     toggleCurrentLineStartEnd,
-    toggleFilter,
     toggleSearchPanel,
+    viewOnly,
   ])
+
+  useEffect(() => {
+    const view = editorView.current
+    if (!view) return
+    view.dispatch({
+      effects: [
+        sourceGutterCompartment.current.reconfigure(viewOnly ? sourceGutter(viewSources) : []),
+        readOnlyCompartment.current.reconfigure([
+          EditorState.readOnly.of(viewOnly),
+          EditorView.editable.of(!viewOnly),
+        ]),
+      ],
+    })
+  }, [filterActive, viewOnly, viewSources])
 
   return (
     <main className={`app-shell${fileDrawerOpen ? ' file-drawer-open' : ''}`}>
       {fileDrawerOpen && <div className="file-drawer-backdrop" onClick={() => setFileDrawerOpen(false)} />}
       <aside id="file-drawer" className="file-drawer" aria-label="Files">
+        <form
+          className="file-quick-search"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const selected = quickSearchResults[quickSearchIndex]
+            openQuickSearchTarget(selected?.value ?? quickSearchQuery)
+          }}
+        >
+          <input
+            value={quickSearchQuery}
+            onChange={(event) => {
+              setQuickSearchQuery(event.target.value)
+              setQuickSearchIndex(0)
+            }}
+            onFocus={() => setQuickSearchFocused(true)}
+            onBlur={() => setQuickSearchFocused(false)}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowDown' && quickSearchResults.length > 0) {
+                event.preventDefault()
+                setQuickSearchIndex((index) => Math.min(index + 1, quickSearchResults.length - 1))
+              } else if (event.key === 'ArrowUp' && quickSearchResults.length > 0) {
+                event.preventDefault()
+                setQuickSearchIndex((index) => Math.max(index - 1, 0))
+              } else if (event.key === 'Escape') {
+                setQuickSearchQuery('')
+                setQuickSearchIndex(0)
+                event.currentTarget.blur()
+              }
+            }}
+            placeholder="ファイルまたはViewを開く"
+            aria-label="ファイルまたは統合ビューを開く"
+            aria-autocomplete="list"
+            aria-controls="file-quick-search-results"
+            aria-expanded={quickSearchVisible}
+          />
+          <button type="submit" disabled={!quickSearchQuery.trim()}>
+            開く
+          </button>
+          <button
+            type="button"
+            className="file-drawer-icon-button"
+            onClick={() => setFileDrawerOpen(false)}
+            aria-label="閉じる"
+            title="閉じる"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </button>
+          {quickSearchVisible && (
+            <div id="file-quick-search-results" className="file-quick-search-results" role="listbox">
+              {quickSearchResults.length > 0 ? (
+                quickSearchResults.map((candidate, index) => (
+                  <button
+                    key={`${candidate.kind}:${candidate.value}`}
+                    type="button"
+                    role="option"
+                    aria-selected={index === quickSearchIndex}
+                    className={index === quickSearchIndex ? 'active' : ''}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => openQuickSearchTarget(candidate.value)}
+                  >
+                    <span>{candidate.label}</span>
+                    <small>{candidate.kind === 'folder' ? '配下を統合表示' : '編集'}</small>
+                  </button>
+                ))
+              ) : (
+                <p>一致するファイルはありません。入力名で開けます。</p>
+              )}
+            </div>
+          )}
+        </form>
         <div className="file-drawer-controls">
           <label htmlFor="file-sort">ファイル並び順</label>
           <select
@@ -1033,17 +1273,6 @@ function EditorApp() {
             disabled={fileListLoading}
           >
             更新
-          </button>
-          <button
-            type="button"
-            className="file-drawer-icon-button"
-            onClick={() => setFileDrawerOpen(false)}
-            aria-label="閉じる"
-            title="閉じる"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m6 6 12 12M18 6 6 18" />
-            </svg>
           </button>
         </div>
         <div className="file-drawer-filter" aria-label="ファイル表示">
@@ -1114,13 +1343,10 @@ function EditorApp() {
                     <button
                       type="button"
                       className="file-tree-folder-label"
+                      title={`${entry.path}/* を統合ビューで開く`}
                       onClick={() => {
-                        setCollapsedFolders((folders) => {
-                          const nextFolders = new Set(folders)
-                          if (nextFolders.has(entry.path)) nextFolders.delete(entry.path)
-                          else nextFolders.add(entry.path)
-                          return nextFolders
-                        })
+                        openFolderViewInNewTab(entry.path)
+                        setFileDrawerOpen(false)
                       }}
                     >
                       {entry.label}
@@ -1173,13 +1399,17 @@ function EditorApp() {
             alt=""
             aria-hidden="true"
           />
-          <input
-            className="file-name-input"
-            value={fileName}
-            onChange={(event) => setFileName(event.target.value.trim() || 'main')}
-            onBlur={() => void loadCurrentFile()}
-            aria-label="File name"
-          />
+          {viewOnly ? (
+            <span className="view-name-label">View: {viewSpec}</span>
+          ) : (
+            <input
+              className="file-name-input"
+              value={fileName}
+              onChange={(event) => setFileName(event.target.value.trim() || 'main')}
+              onBlur={() => void loadCurrentFile()}
+              aria-label="File name"
+            />
+          )}
           <button
             type="button"
             className={`save-state save-state-${saveState}`}
@@ -1190,17 +1420,24 @@ function EditorApp() {
               }
               if (saveState === 'dirty' || saveState === 'error') void saveCurrentFile()
             }}
-            disabled={saveState !== 'dirty' && saveState !== 'error' && saveState !== 'conflict'}
+            disabled={viewOnly || (saveState !== 'dirty' && saveState !== 'error' && saveState !== 'conflict')}
             title="Save"
           >
             {statusLabel}
           </button>
+          {viewOnly && (
+            <button type="button" onClick={toggleFilter} aria-pressed={filterOpen}>
+              Filter
+            </button>
+          )}
         </div>
         <div className="session-controls">
           <span className="user-label">{user?.displayName ?? user?.email}</span>
-          <button type="button" onClick={doneCurrentLine}>
-            Done
-          </button>
+          {!viewOnly && (
+            <button type="button" onClick={doneCurrentLine}>
+              Done
+            </button>
+          )}
           <button type="button" onClick={exportCurrentFile}>
             Export
           </button>

@@ -11,6 +11,7 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore'
 import { createDefaultTemplateContent } from '../domain/defaultTemplate'
+import { matchesViewSelector } from '../domain/viewRef'
 
 export type EditaskFile = {
   name: string
@@ -65,6 +66,24 @@ export async function listFileIndex(db: Firestore, uid: string): Promise<Editask
   batch.set(fileIndexMetaDoc(db, uid), { complete: true }, { merge: true })
   await batch.commit()
   return files
+}
+
+export async function loadViewFiles(db: Firestore, uid: string, selectors: string[]): Promise<EditaskFile[]> {
+  const index = await listFileIndex(db, uid)
+  const names = index
+    .filter((file) => selectors.some((selector) => matchesViewSelector(file.name, selector)))
+    .map((file) => file.name)
+  const snapshots = await Promise.all(names.map((name) => getDoc(fileDoc(db, uid, name))))
+  return snapshots.flatMap((snapshot, index) => {
+    if (!snapshot.exists()) return []
+    const data = snapshot.data()
+    return [{
+      name: String(data.name ?? names[index]),
+      content: String(data.content ?? ''),
+      revision: Number(data.revision ?? 0),
+      updatedAt: data.updatedAt,
+    }]
+  })
 }
 
 export async function loadFile(db: Firestore, uid: string, fileName: string): Promise<EditaskFile> {

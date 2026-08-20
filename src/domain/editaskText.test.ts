@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  aggregateTaskLines,
   collectFileRefs,
   formatEstimateMinutes,
   formatWorkForecast,
@@ -150,6 +151,28 @@ describe('collectFileRefs', () => {
   })
 })
 
+describe('aggregateTaskLines', () => {
+  it('sorts incomplete tasks from today onward and preserves their source', () => {
+    const tasks = aggregateTaskLines([
+      { name: 'home/b', content: `            2026/06/27 ${SAT} later` },
+      {
+        name: 'home/a',
+        content: [
+          `            2026/06/25 ${THU} past`,
+          `10:00 10:30 2026/06/26 ${FRI} done`,
+          `            2026/06/26 ${FRI} earlier`,
+          `            2026/06/26 ${FRI} -- section`,
+        ].join('\n'),
+      },
+    ], { year: 2026, month: 6, day: 26 })
+
+    expect(tasks).toEqual([
+      { line: `            2026/06/26 ${FRI} earlier`, source: 'home/a' },
+      { line: `            2026/06/27 ${SAT} later`, source: 'home/b' },
+    ])
+  })
+})
+
 describe('formatEstimateMinutes', () => {
   it('formats estimate minutes for the status bar', () => {
     expect(formatEstimateMinutes(0)).toBe('\u0030\u5206')
@@ -181,6 +204,7 @@ describe('normalizeDocumentText', () => {
           '',
           '',
         ].join('\n'),
+        { year: 2026, month: 7, day: 1 },
       ),
     ).toBe(`            2026/07/01 ${WED} task a\n            2026/07/01 ${WED} task b\n`)
   })
