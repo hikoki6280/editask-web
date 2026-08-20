@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  collectFileRefs,
   formatEstimateMinutes,
   formatWorkForecast,
   isCompletedTaskLine,
@@ -129,6 +130,23 @@ describe('parseEstimateMinutes', () => {
     expect(parseEstimateMinutes('h10m')).toBeUndefined()
     expect(parseEstimateMinutes('2.5h')).toBeUndefined()
     expect(parseEstimateMinutes('abc')).toBeUndefined()
+  })
+})
+
+describe('collectFileRefs', () => {
+  it('collects local refs and excludes URLs and memo blocks', () => {
+    const refs = collectFileRefs(
+      [
+        '            2026/06/26 task r:projectA',
+        '            2026/06/26 task ref:projectB.txt',
+        '            2026/06/26 task ref:https://example.com',
+        '"""',
+        '            2026/06/26 memo r:hidden',
+        '"""',
+      ].join('\n'),
+    )
+
+    expect(refs).toEqual(new Set(['projectA', 'projectB']))
   })
 })
 

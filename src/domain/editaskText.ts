@@ -522,3 +522,16 @@ export function getRefValueFromLine(line: string): string | undefined {
 export function isUrlRef(value: string): boolean {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value.trim())
 }
+
+export function collectFileRefs(text: string): Set<string> {
+  const refs = new Set<string>()
+  for (const region of splitDocumentRegions(text)) {
+    if (region.kind === 'memo') continue
+    for (const line of region.text.split(/\r?\n/)) {
+      const ref = parseTaskLine(line).attrs.ref
+      if (!ref || isUrlRef(ref)) continue
+      refs.add(ref.replace(/\.txt$/i, '') || 'main')
+    }
+  }
+  return refs
+}

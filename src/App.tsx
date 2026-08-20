@@ -10,6 +10,7 @@ import {
   type FilterParts,
 } from './domain/filter'
 import {
+  collectFileRefs,
   getRefValueFromLine,
   formatWorkForecast,
   isUrlRef,
@@ -23,10 +24,12 @@ import { editaskHighlightExtensions } from './editor/editaskExtensions'
 import { db, firebaseEnabled } from './firebase/client'
 import {
   ensureFileFromDefault,
+  listFileIndex,
   loadFile,
   saveFile,
   subscribeFile,
   type EditaskFile,
+  type EditaskFileIndex,
 } from './firebase/fileRepository'
 import { useAuthUser } from './hooks/useAuthUser'
 
@@ -53,6 +56,19 @@ type DiffPreview = {
   remoteOverflow: number
 }
 
+type FileSort = 'updated' | 'name'
+type FileDisplay = 'all' | 'refs'
+
+type FileTreeNode = {
+  label: string
+  file?: EditaskFileIndex
+  children: Map<string, FileTreeNode>
+}
+
+type FileTreeEntry =
+  | { kind: 'folder'; label: string; path: string; file?: EditaskFileIndex; depth: number }
+  | { kind: 'file'; file: EditaskFileIndex; depth: number }
+
 function formatSavedAt(value: unknown): string {
   if (!value || typeof value !== 'object' || !('toDate' in value)) return '不明'
   const toDate = (value as { toDate?: unknown }).toDate
@@ -61,6 +77,52 @@ function formatSavedAt(value: unknown): string {
   const date = toDate.call(value)
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '不明'
   return new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+}
+
+function updatedAtMillis(value: unknown): number {
+  if (!value || typeof value !== 'object' || !('toMillis' in value)) return 0
+  const toMillis = (value as { toMillis?: unknown }).toMillis
+  return typeof toMillis === 'function' ? Number(toMillis.call(value)) || 0 : 0
+}
+
+function buildFileTree(files: EditaskFileIndex[], sort: FileSort): FileTreeEntry[] {
+  const root = new Map<string, FileTreeNode>()
+  for (const file of files) {
+    const parts = file.name.split('/').filter(Boolean)
+    if (parts.length === 0) continue
+
+    let children = root
+    for (const [index, label] of parts.entries()) {
+      let node = children.get(label)
+      if (!node) {
+        node = { label, children: new Map() }
+        children.set(label, node)
+      }
+      if (index === parts.length - 1) node.file = file
+      children = node.children
+    }
+  }
+
+  const newestIn = (node: FileTreeNode): number =>
+    Math.max(updatedAtMillis(node.file?.updatedAt), ...[...node.children.values()].map(newestIn), 0)
+  const compareNodes = (a: FileTreeNode, b: FileTreeNode): number =>
+    sort === 'name'
+      ? a.label.localeCompare(b.label, 'ja')
+      : newestIn(b) - newestIn(a) || a.label.localeCompare(b.label, 'ja')
+  const entries: FileTreeEntry[] = []
+  const visit = (nodes: Map<string, FileTreeNode>, depth: number, parentPath = '') => {
+    for (const node of [...nodes.values()].sort(compareNodes)) {
+      if (node.children.size > 0) {
+        const path = parentPath ? `${parentPath}/${node.label}` : node.label
+        entries.push({ kind: 'folder', label: node.label, path, file: node.file, depth })
+        visit(node.children, depth + 1, path)
+      } else if (node.file) {
+        entries.push({ kind: 'file', file: node.file, depth })
+      }
+    }
+  }
+  visit(root, 0)
+  return entries
 }
 
 // basicSetup starts with lineNumbers() and highlightActiveLineGutter().
@@ -234,10 +296,20 @@ function EditorApp() {
   const [filterVisibleCount, setFilterVisibleCount] = useState<number | null>(null)
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [conflictModalOpen, setConflictModalOpen] = useState(false)
-  const [conflictVersion, setConflictVersion] = useState(0)
+  const [pendingRemoteFile, setPendingRemoteFile] = useState<EditaskFile | null>(null)
+  const [conflictLocalContent, setConflictLocalContent] = useState('')
   const [todayTaskSummary, setTodayTaskSummary] = useState(() => summarizeTodayTasks(''))
   const [lastSyncedUpdatedAt, setLastSyncedUpdatedAt] = useState<unknown>(undefined)
-  const [pendingRemoteUpdatedAt, setPendingRemoteUpdatedAt] = useState<unknown>(undefined)
+  const [fileDrawerOpen, setFileDrawerOpen] = useState(false)
+  const [fileList, setFileList] = useState<EditaskFileIndex[] | null>(null)
+  const [fileListLoading, setFileListLoading] = useState(false)
+  const [fileListError, setFileListError] = useState(false)
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set())
+  const [fileDisplay, setFileDisplay] = useState<FileDisplay>('all')
+  const [currentFileRefs, setCurrentFileRefs] = useState<Set<string>>(() => new Set())
+  const [fileSort, setFileSort] = useState<FileSort>(() =>
+    window.localStorage.getItem('editask-file-sort') === 'name' ? 'name' : 'updated',
+  )
 
   useEffect(() => {
     userRef.current = user
@@ -247,6 +319,10 @@ function EditorApp() {
     fileNameRef.current = fileName
     document.title = fileName || 'EdiTask'
   }, [fileName])
+
+  useEffect(() => {
+    window.localStorage.setItem('editask-file-sort', fileSort)
+  }, [fileSort])
 
   useEffect(() => {
     filterActiveRef.current = filterActive
@@ -277,12 +353,46 @@ function EditorApp() {
       : view.state.doc.toString()
   }, [])
 
+  const displayedFiles = useMemo(
+    () => (fileDisplay === 'refs' ? (fileList ?? []).filter((file) => currentFileRefs.has(file.name)) : fileList ?? []),
+    [currentFileRefs, fileDisplay, fileList],
+  )
+  const fileTree = useMemo(() => buildFileTree(displayedFiles, fileSort), [displayedFiles, fileSort])
+  const visibleFileTree = useMemo(
+    () =>
+      fileTree.filter((entry) => {
+        const path = entry.kind === 'folder' ? entry.path : entry.file.name
+        const parentParts = path.split('/').filter(Boolean)
+        parentParts.pop()
+        return !parentParts.some((_, index) => collapsedFolders.has(parentParts.slice(0, index + 1).join('/')))
+      }),
+    [collapsedFolders, fileTree],
+  )
+
+  const loadFileList = useCallback(async () => {
+    if (!db || !user || fileListLoading) return
+    setFileListLoading(true)
+    setFileListError(false)
+    try {
+      setFileList(await listFileIndex(db, user.uid))
+    } catch {
+      setFileListError(true)
+    } finally {
+      setFileListLoading(false)
+    }
+  }, [fileListLoading, user])
+
+  const openFileInNewTab = useCallback((nextName: string) => {
+    const url = `${window.location.origin}${window.location.pathname}#/files/${encodeURIComponent(nextName)}`
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }, [])
+
   const conflictDiff = useMemo(() => {
-    if (!conflictModalOpen || pendingRemoteFileRef.current === null) {
+    if (!conflictModalOpen || pendingRemoteFile === null) {
       return buildLineDiffPreview('', '')
     }
-    return buildLineDiffPreview(currentEditorFullText(), pendingRemoteFileRef.current.content)
-  }, [conflictModalOpen, conflictVersion, currentEditorFullText])
+    return buildLineDiffPreview(conflictLocalContent, pendingRemoteFile.content)
+  }, [conflictLocalContent, conflictModalOpen, pendingRemoteFile])
 
   const captureCursorRestoreTarget = useCallback((view: EditorView): CursorRestoreTarget => {
     const line = view.state.doc.lineAt(view.state.selection.main.head)
@@ -308,8 +418,9 @@ function EditorApp() {
       const loaded = await loadFile(db, currentUser.uid, currentFileName)
       parkedTextRef.current = ''
       pendingRemoteFileRef.current = null
+      setPendingRemoteFile(null)
+      setConflictLocalContent('')
       setLastSyncedUpdatedAt(loaded.updatedAt)
-      setPendingRemoteUpdatedAt(undefined)
       setConflictModalOpen(false)
       filterActiveRef.current = false
       filterOpenRef.current = false
@@ -321,6 +432,7 @@ function EditorApp() {
         changes: { from: 0, to: editorView.current.state.doc.length, insert: loaded.content },
       })
       setTodayTaskSummary(summarizeTodayTasks(loaded.content))
+      setCurrentFileRefs(collectFileRefs(loaded.content))
       setSaveState('saved')
     } catch {
       setSaveState('error')
@@ -366,7 +478,8 @@ function EditorApp() {
       }
       setTodayTaskSummary(summarizeTodayTasks(normalized))
       pendingRemoteFileRef.current = null
-      setPendingRemoteUpdatedAt(undefined)
+      setPendingRemoteFile(null)
+      setConflictLocalContent('')
       setConflictModalOpen(false)
       setSaveState('saved')
     } catch {
@@ -703,7 +816,8 @@ function EditorApp() {
 
     parkedTextRef.current = ''
     pendingRemoteFileRef.current = null
-    setPendingRemoteUpdatedAt(undefined)
+    setPendingRemoteFile(null)
+    setConflictLocalContent('')
     filterActiveRef.current = false
     filterOpenRef.current = false
     setFilterActive(false)
@@ -717,6 +831,7 @@ function EditorApp() {
       scrollIntoView: true,
     })
     setTodayTaskSummary(summarizeTodayTasks(remoteContent))
+    setCurrentFileRefs(collectFileRefs(remoteContent))
     setLastSyncedUpdatedAt(remoteFile.updatedAt)
     setSaveState('saved')
     view.focus()
@@ -727,7 +842,10 @@ function EditorApp() {
   }, [fileName])
 
   useEffect(() => {
-    void loadCurrentFile()
+    const timer = window.setTimeout(() => {
+      void loadCurrentFile()
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [fileName, loadCurrentFile, user])
 
   useEffect(() => {
@@ -753,8 +871,8 @@ function EditorApp() {
 
         if (saveStateRef.current !== 'saved' || filterActiveRef.current) {
           pendingRemoteFileRef.current = remoteFile
-          setPendingRemoteUpdatedAt(remoteFile.updatedAt)
-          setConflictVersion((version) => version + 1)
+          setPendingRemoteFile(remoteFile)
+          setConflictLocalContent(currentContent)
           saveStateRef.current = 'conflict'
           setSaveState('conflict')
           return
@@ -767,6 +885,7 @@ function EditorApp() {
           scrollIntoView: true,
         })
         setTodayTaskSummary(summarizeTodayTasks(remoteFile.content))
+        setCurrentFileRefs(collectFileRefs(remoteFile.content))
         setLastSyncedUpdatedAt(remoteFile.updatedAt)
         setSaveState('saved')
       },
@@ -844,6 +963,10 @@ function EditorApp() {
         editaskHighlightExtensions,
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
+            const currentText = filterActiveRef.current
+              ? joinFilterParts(parkedTextRef.current, update.state.doc.toString())
+              : update.state.doc.toString()
+            setCurrentFileRefs(collectFileRefs(currentText))
             if (filterActiveRef.current) {
               setFilterVisibleCount(update.state.doc.length > 0 ? update.state.doc.lines : 0)
             }
@@ -890,9 +1013,160 @@ function EditorApp() {
   ])
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell${fileDrawerOpen ? ' file-drawer-open' : ''}`}>
+      {fileDrawerOpen && <div className="file-drawer-backdrop" onClick={() => setFileDrawerOpen(false)} />}
+      <aside id="file-drawer" className="file-drawer" aria-label="Files">
+        <div className="file-drawer-controls">
+          <label htmlFor="file-sort">ファイル並び順</label>
+          <select
+            id="file-sort"
+            value={fileSort}
+            onChange={(event) => setFileSort(event.target.value as FileSort)}
+          >
+            <option value="updated">新しい順</option>
+            <option value="name">abc順</option>
+          </select>
+          <button
+            type="button"
+            className="file-drawer-refresh-button"
+            onClick={() => void loadFileList()}
+            disabled={fileListLoading}
+          >
+            更新
+          </button>
+          <button
+            type="button"
+            className="file-drawer-icon-button"
+            onClick={() => setFileDrawerOpen(false)}
+            aria-label="閉じる"
+            title="閉じる"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+        <div className="file-drawer-filter" aria-label="ファイル表示">
+          <span>表示</span>
+          <button
+            type="button"
+            className={fileDisplay === 'all' ? 'active' : ''}
+            aria-pressed={fileDisplay === 'all'}
+            onClick={() => setFileDisplay('all')}
+          >
+            すべて
+          </button>
+          <button
+            type="button"
+            className={fileDisplay === 'refs' ? 'active' : ''}
+            aria-pressed={fileDisplay === 'refs'}
+            onClick={() => setFileDisplay('refs')}
+          >
+            参照先
+          </button>
+        </div>
+        <nav className="file-tree" aria-label="File tree">
+          {fileListLoading && fileList === null ? (
+            <p>読み込み中…</p>
+          ) : fileListError ? (
+            <p>ファイル一覧を取得できませんでした。</p>
+          ) : fileTree.length === 0 ? (
+            <p>ファイルはありません。</p>
+          ) : (
+            visibleFileTree.map((entry) =>
+              entry.kind === 'folder' ? (
+                <div
+                  className="file-tree-folder"
+                  key={`folder:${entry.path}`}
+                  style={{ paddingInlineStart: `${12 + entry.depth * 16}px` }}
+                >
+                  <button
+                    type="button"
+                    className="file-tree-chevron-button"
+                    aria-label={`${entry.label}を${collapsedFolders.has(entry.path) ? '展開' : '折りたたみ'}`}
+                    aria-expanded={!collapsedFolders.has(entry.path)}
+                    onClick={() => {
+                      setCollapsedFolders((folders) => {
+                        const nextFolders = new Set(folders)
+                        if (nextFolders.has(entry.path)) nextFolders.delete(entry.path)
+                        else nextFolders.add(entry.path)
+                        return nextFolders
+                      })
+                    }}
+                  >
+                    <span className="file-tree-chevron" aria-hidden="true">›</span>
+                  </button>
+                  {entry.file ? (
+                    <button
+                      type="button"
+                      className="file-tree-folder-file"
+                      aria-current={entry.file.name === fileName ? 'page' : undefined}
+                      title={`${entry.file.name}\n保存: ${formatSavedAt(entry.file.updatedAt)}`}
+                      onClick={() => {
+                        openFileInNewTab(entry.file!.name)
+                        setFileDrawerOpen(false)
+                      }}
+                    >
+                      <span>{entry.label}</span>
+                      <small>{formatSavedAt(entry.file.updatedAt)}</small>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="file-tree-folder-label"
+                      onClick={() => {
+                        setCollapsedFolders((folders) => {
+                          const nextFolders = new Set(folders)
+                          if (nextFolders.has(entry.path)) nextFolders.delete(entry.path)
+                          else nextFolders.add(entry.path)
+                          return nextFolders
+                        })
+                      }}
+                    >
+                      {entry.label}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="file-tree-file"
+                  key={`file:${entry.file.name}`}
+                  aria-current={entry.file.name === fileName ? 'page' : undefined}
+                  style={{ paddingInlineStart: `${12 + entry.depth * 16}px` }}
+                  title={`${entry.file.name}\n保存: ${formatSavedAt(entry.file.updatedAt)}`}
+                  onClick={() => {
+                    openFileInNewTab(entry.file.name)
+                    setFileDrawerOpen(false)
+                  }}
+                >
+                  <span>{entry.file.name.split('/').filter(Boolean).at(-1)}</span>
+                  <small>{formatSavedAt(entry.file.updatedAt)}</small>
+                </button>
+              ),
+            )
+          )}
+        </nav>
+      </aside>
       <header className="topbar">
         <div className="file-controls">
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => {
+              const nextOpen = !fileDrawerOpen
+              setFileDrawerOpen(nextOpen)
+              if (nextOpen && fileList === null) void loadFileList()
+            }}
+            aria-expanded={fileDrawerOpen}
+            aria-controls="file-drawer"
+            aria-label="ファイル一覧"
+            title="ファイル一覧"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 5h16M4 12h16M4 19h16" />
+            </svg>
+          </button>
           <img
             className="app-icon"
             src={`${import.meta.env.BASE_URL}favicon-32x32.png`}
@@ -958,7 +1232,7 @@ function EditorApp() {
               <section className="conflict-file-option">
                 <h3>リモートのファイル</h3>
                 <p className="conflict-file-meta">
-                  保存: {formatSavedAt(pendingRemoteUpdatedAt)}
+                  保存: {formatSavedAt(pendingRemoteFile?.updatedAt)}
                 </p>
                 <pre>
                   {conflictDiff.remoteOnly.length > 0

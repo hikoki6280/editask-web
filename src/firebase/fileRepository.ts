@@ -1,10 +1,12 @@
 import {
+  collection,
   doc,
+  getDocs,
   getDoc,
   increment,
   onSnapshot,
   serverTimestamp,
-  setDoc,
+  writeBatch,
   type Firestore,
   type Unsubscribe,
 } from 'firebase/firestore'
@@ -17,8 +19,52 @@ export type EditaskFile = {
   updatedAt?: unknown
 }
 
+export type EditaskFileIndex = {
+  name: string
+  updatedAt?: unknown
+}
+
 function fileDoc(db: Firestore, uid: string, fileName: string) {
   return doc(db, 'users', uid, 'files', encodeURIComponent(fileName))
+}
+
+function fileIndexDoc(db: Firestore, uid: string, fileName: string) {
+  return doc(db, 'users', uid, 'fileIndex', encodeURIComponent(fileName))
+}
+
+function fileIndexMetaDoc(db: Firestore, uid: string) {
+  return doc(db, 'users', uid, 'metadata', 'fileIndex')
+}
+
+export async function listFileIndex(db: Firestore, uid: string): Promise<EditaskFileIndex[]> {
+  const indexMetaSnapshot = await getDoc(fileIndexMetaDoc(db, uid))
+  if (indexMetaSnapshot.data()?.complete === true) {
+    const indexSnapshot = await getDocs(collection(db, 'users', uid, 'fileIndex'))
+    return indexSnapshot.docs.map((snapshot) => {
+      const data = snapshot.data()
+      return { name: String(data.name ?? decodeURIComponent(snapshot.id)), updatedAt: data.updatedAt }
+    })
+  }
+
+  const filesSnapshot = await getDocs(collection(db, 'users', uid, 'files'))
+  if (filesSnapshot.empty) {
+    const batch = writeBatch(db)
+    batch.set(fileIndexMetaDoc(db, uid), { complete: true })
+    await batch.commit()
+    return []
+  }
+
+  const batch = writeBatch(db)
+  const files = filesSnapshot.docs.map((snapshot) => {
+    const data = snapshot.data()
+    const name = String(data.name ?? decodeURIComponent(snapshot.id))
+    const updatedAt = data.updatedAt
+    batch.set(fileIndexDoc(db, uid, name), { name, updatedAt: updatedAt ?? serverTimestamp() }, { merge: true })
+    return { name, updatedAt }
+  })
+  batch.set(fileIndexMetaDoc(db, uid), { complete: true }, { merge: true })
+  await batch.commit()
+  return files
 }
 
 export async function loadFile(db: Firestore, uid: string, fileName: string): Promise<EditaskFile> {
@@ -32,12 +78,22 @@ export async function loadFile(db: Firestore, uid: string, fileName: string): Pr
         const defaultData = defaultSnapshot.data()
         const defaultContent = String(defaultData.content ?? '')
         if (defaultContent.trim()) {
-          await setDoc(targetRef, {
+          const batch = writeBatch(db)
+          batch.set(targetRef, {
             name: fileName,
             content: defaultContent,
             revision: 1,
             updatedAt: serverTimestamp(),
           })
+          batch.set(fileIndexDoc(db, uid, fileName), {
+            name: fileName,
+            updatedAt: serverTimestamp(),
+          })
+          batch.set(fileIndexDoc(db, uid, 'default'), {
+            name: 'default',
+            updatedAt: defaultData.updatedAt ?? serverTimestamp(),
+          })
+          await batch.commit()
           return { name: fileName, content: defaultContent, revision: 1 }
         }
       }
@@ -49,8 +105,13 @@ export async function loadFile(db: Firestore, uid: string, fileName: string): Pr
         revision: 1,
         updatedAt: serverTimestamp(),
       }
-      await setDoc(defaultRef, { ...initialFile, name: 'default' }, { merge: false })
-      await setDoc(targetRef, initialFile, { merge: false })
+      const batch = writeBatch(db)
+      batch.set(defaultRef, { ...initialFile, name: 'default' }, { merge: false })
+      batch.set(targetRef, initialFile, { merge: false })
+      batch.set(fileIndexDoc(db, uid, 'default'), { name: 'default', updatedAt: serverTimestamp() })
+      batch.set(fileIndexDoc(db, uid, fileName), { name: fileName, updatedAt: serverTimestamp() })
+      batch.set(fileIndexMetaDoc(db, uid), { complete: true })
+      await batch.commit()
       return { name: fileName, content, revision: 1 }
     }
     return { name: fileName, content: '', revision: 0 }
@@ -98,7 +159,8 @@ export async function saveFile(
   fileName: string,
   content: string,
 ): Promise<void> {
-  await setDoc(
+  const batch = writeBatch(db)
+  batch.set(
     fileDoc(db, uid, fileName),
     {
       name: fileName,
@@ -108,6 +170,8 @@ export async function saveFile(
     },
     { merge: true },
   )
+  batch.set(fileIndexDoc(db, uid, fileName), { name: fileName, updatedAt: serverTimestamp() }, { merge: true })
+  await batch.commit()
 }
 
 export async function ensureFileFromDefault(
@@ -126,11 +190,17 @@ export async function ensureFileFromDefault(
   const defaultContent = String(defaultData.content ?? '')
   if (!defaultContent.trim()) return false
 
-  await setDoc(targetRef, {
+  const batch = writeBatch(db)
+  batch.set(targetRef, {
     name: fileName,
     content: defaultContent,
     revision: 1,
     updatedAt: serverTimestamp(),
   })
+  batch.set(fileIndexDoc(db, uid, fileName), {
+    name: fileName,
+    updatedAt: serverTimestamp(),
+  })
+  await batch.commit()
   return true
 }

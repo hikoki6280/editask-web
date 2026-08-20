@@ -12,14 +12,11 @@ export type AuthState = {
 
 export function useAuthUser(): AuthState {
   const [user, setUser] = useState<User | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => Boolean(auth))
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!auth) {
-      setLoading(false)
-      return undefined
-    }
+    if (!auth) return undefined
 
     return onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser)
