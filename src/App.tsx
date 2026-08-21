@@ -28,9 +28,11 @@ import { buildFileQuickSearchCandidates, quickSearchFiles } from './domain/fileQ
 import { db, firebaseEnabled } from './firebase/client'
 import {
   ensureFileFromDefault,
+  deleteFile,
   listFileIndex,
   loadFile,
   loadViewFiles,
+  renameFile,
   saveFile,
   subscribeFile,
   type EditaskFile,
@@ -64,6 +66,7 @@ type DiffPreview = {
 
 type FileSort = 'updated' | 'name'
 type FileDisplay = 'all' | 'refs'
+type FileContextMenu = { file: EditaskFileIndex; x: number; y: number }
 
 type FileTreeNode = {
   label: string
@@ -335,6 +338,7 @@ function EditorApp() {
   const [quickSearchQuery, setQuickSearchQuery] = useState('')
   const [quickSearchFocused, setQuickSearchFocused] = useState(false)
   const [quickSearchIndex, setQuickSearchIndex] = useState(0)
+  const [fileContextMenu, setFileContextMenu] = useState<FileContextMenu | null>(null)
   const [fileSort, setFileSort] = useState<FileSort>(() =>
     window.localStorage.getItem('editask-file-sort') === 'name' ? 'name' : 'updated',
   )
@@ -446,6 +450,55 @@ function EditorApp() {
     },
     [openFileInNewTab],
   )
+
+  const renameFromSidebar = useCallback(async () => {
+    const selected = fileContextMenu?.file
+    const currentUser = userRef.current
+    if (!selected || !db || !currentUser) return
+    if (!viewOnly && selected.name === fileName && saveState === 'dirty') {
+      window.alert('未保存の変更があります。保存してから名前を変更してください。')
+      return
+    }
+
+    const entered = window.prompt('新しいファイル名', selected.name)
+    if (entered === null) return
+    const nextName = entered.trim().replace(/\.txt$/i, '')
+    if (!nextName) {
+      window.alert('ファイル名を入力してください。')
+      return
+    }
+
+    try {
+      await renameFile(db, currentUser.uid, selected.name, nextName)
+      if (!viewOnly && selected.name === fileName) {
+        fileNameRef.current = nextName
+        setFileName(nextName)
+      }
+      setFileContextMenu(null)
+      await loadFileList()
+    } catch (error) {
+      window.alert(error instanceof Error && error.message.includes('already exists') ? '同名のファイルが既にあります。' : '名前を変更できませんでした。')
+    }
+  }, [fileContextMenu, fileName, loadFileList, saveState, viewOnly])
+
+  const deleteFromSidebar = useCallback(async () => {
+    const selected = fileContextMenu?.file
+    const currentUser = userRef.current
+    if (!selected || !db || !currentUser) return
+    if (!viewOnly && selected.name === fileName) {
+      window.alert('開いているファイルは削除できません。別のファイルを開いてから削除してください。')
+      return
+    }
+    if (!window.confirm(`「${selected.name}」を削除しますか？\nこの操作は元に戻せません。`)) return
+
+    try {
+      await deleteFile(db, currentUser.uid, selected.name)
+      setFileContextMenu(null)
+      await loadFileList()
+    } catch {
+      window.alert('ファイルを削除できませんでした。')
+    }
+  }, [fileContextMenu, fileName, loadFileList, viewOnly])
 
   const conflictDiff = useMemo(() => {
     if (!conflictModalOpen || pendingRemoteFile === null) {
@@ -761,6 +814,13 @@ function EditorApp() {
     window.addEventListener('keydown', handleGlobalFilterShortcut)
     return () => window.removeEventListener('keydown', handleGlobalFilterShortcut)
   }, [toggleFilter])
+
+  useEffect(() => {
+    if (!fileContextMenu) return undefined
+    const closeContextMenu = () => setFileContextMenu(null)
+    window.addEventListener('click', closeContextMenu)
+    return () => window.removeEventListener('click', closeContextMenu)
+  }, [fileContextMenu])
 
   const toggleSearchPanel = useCallback((view: EditorView) => {
     if (searchPanelOpen(view.state)) {
@@ -1335,6 +1395,10 @@ function EditorApp() {
                         openFileInNewTab(entry.file!.name)
                         setFileDrawerOpen(false)
                       }}
+                      onContextMenu={(event) => {
+                        event.preventDefault()
+                        setFileContextMenu({ file: entry.file!, x: event.clientX, y: event.clientY })
+                      }}
                     >
                       <span>{entry.label}</span>
                       <small>{formatSavedAt(entry.file.updatedAt)}</small>
@@ -1359,11 +1423,15 @@ function EditorApp() {
                   className="file-tree-file"
                   key={`file:${entry.file.name}`}
                   aria-current={entry.file.name === fileName ? 'page' : undefined}
-                  style={{ paddingInlineStart: `${12 + entry.depth * 16}px` }}
+                  style={{ paddingInlineStart: `${32 + entry.depth * 16}px` }}
                   title={`${entry.file.name}\n保存: ${formatSavedAt(entry.file.updatedAt)}`}
                   onClick={() => {
                     openFileInNewTab(entry.file.name)
                     setFileDrawerOpen(false)
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault()
+                    setFileContextMenu({ file: entry.file, x: event.clientX, y: event.clientY })
                   }}
                 >
                   <span>{entry.file.name.split('/').filter(Boolean).at(-1)}</span>
@@ -1374,6 +1442,21 @@ function EditorApp() {
           )}
         </nav>
       </aside>
+      {fileContextMenu && (
+        <div
+          className="file-context-menu"
+          role="menu"
+          aria-label={`${fileContextMenu.file.name} の操作`}
+          style={{ left: fileContextMenu.x, top: fileContextMenu.y }}
+        >
+          <button type="button" role="menuitem" onClick={() => void renameFromSidebar()}>
+            Rename
+          </button>
+          <button type="button" role="menuitem" className="danger" onClick={() => void deleteFromSidebar()}>
+            削除
+          </button>
+        </div>
+      )}
       <header className="topbar">
         <div className="file-controls">
           <button
@@ -1402,13 +1485,7 @@ function EditorApp() {
           {viewOnly ? (
             <span className="view-name-label">View: {viewSpec}</span>
           ) : (
-            <input
-              className="file-name-input"
-              value={fileName}
-              onChange={(event) => setFileName(event.target.value.trim() || 'main')}
-              onBlur={() => void loadCurrentFile()}
-              aria-label="File name"
-            />
+            <span className="file-name-label" title={fileName}>{fileName}</span>
           )}
           <button
             type="button"

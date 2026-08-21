@@ -5,6 +5,7 @@ import {
   getDoc,
   increment,
   onSnapshot,
+  runTransaction,
   serverTimestamp,
   writeBatch,
   type Firestore,
@@ -190,6 +191,37 @@ export async function saveFile(
     { merge: true },
   )
   batch.set(fileIndexDoc(db, uid, fileName), { name: fileName, updatedAt: serverTimestamp() }, { merge: true })
+  await batch.commit()
+}
+
+export async function renameFile(db: Firestore, uid: string, fromName: string, toName: string): Promise<void> {
+  if (fromName === toName) return
+
+  const sourceRef = fileDoc(db, uid, fromName)
+  const targetRef = fileDoc(db, uid, toName)
+  await runTransaction(db, async (transaction) => {
+    const sourceSnapshot = await transaction.get(sourceRef)
+    const targetSnapshot = await transaction.get(targetRef)
+    if (!sourceSnapshot.exists()) throw new Error('Rename source file does not exist')
+    if (targetSnapshot.exists()) throw new Error('Rename target file already exists')
+
+    const source = sourceSnapshot.data()
+    transaction.set(targetRef, {
+      name: toName,
+      content: String(source.content ?? ''),
+      revision: Number(source.revision ?? 0) + 1,
+      updatedAt: serverTimestamp(),
+    })
+    transaction.set(fileIndexDoc(db, uid, toName), { name: toName, updatedAt: serverTimestamp() })
+    transaction.delete(sourceRef)
+    transaction.delete(fileIndexDoc(db, uid, fromName))
+  })
+}
+
+export async function deleteFile(db: Firestore, uid: string, fileName: string): Promise<void> {
+  const batch = writeBatch(db)
+  batch.delete(fileDoc(db, uid, fileName))
+  batch.delete(fileIndexDoc(db, uid, fileName))
   await batch.commit()
 }
 
